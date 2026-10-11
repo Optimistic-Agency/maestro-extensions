@@ -1,0 +1,198 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Table Lens</title>
+<script type="application/oa-panel+json">
+{
+  "id": "table-lens",
+  "name": "Table Lens",
+  "version": "1.0.0",
+  "description": "Browse, sort, and filter a CSV file from your project as a table.",
+  "icon": "📊",
+  "permissions": ["file.read"]
+}
+</script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    font: 12px/1.4 var(--font-sans, system-ui, sans-serif);
+    color: var(--color-text-primary, #e5e7eb);
+    background: var(--color-background-primary, #111827);
+  }
+  header {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 10px; border-bottom: 1px solid var(--color-border-primary, #374151);
+    background: var(--color-background-secondary, #1f2937);
+  }
+  button, input {
+    font: inherit; color: inherit; border-radius: 4px;
+    border: 1px solid var(--color-border-secondary, #4b5563);
+    background: var(--color-background-tertiary, #374151);
+  }
+  button { padding: 3px 8px; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  input { padding: 3px 8px; min-width: 0; flex: 1 1 140px; outline: none; }
+  input:focus { border-color: var(--color-ring-primary, #3b82f6); }
+  .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+  .muted { color: var(--color-text-secondary, #9ca3af); }
+  main { flex: 1; overflow: auto; }
+  table { border-collapse: collapse; min-width: 100%; }
+  th, td { padding: 4px 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--color-border-primary, #374151); }
+  th {
+    position: sticky; top: 0; cursor: pointer; user-select: none; font-weight: 600;
+    background: var(--color-background-secondary, #1f2937);
+  }
+  tr:hover td { background: var(--color-background-secondary, #1f2937); }
+  .empty { padding: 32px 16px; text-align: center; }
+  footer {
+    display: flex; gap: 8px; align-items: center; justify-content: flex-end;
+    padding: 6px 10px; border-top: 1px solid var(--color-border-primary, #374151);
+  }
+</style>
+</head>
+<body>
+<header>
+  <button id="choose">Choose CSV…</button>
+  <span id="name" class="name muted">No file</span>
+  <input id="filter" type="search" placeholder="Filter rows" disabled>
+</header>
+<main id="main"><div class="empty muted">Choose a CSV file from your project to browse it as a table.</div></main>
+<footer>
+  <span id="count" class="muted"></span>
+  <button id="previous" disabled>‹</button>
+  <span id="page" class="muted"></span>
+  <button id="next" disabled>›</button>
+</footer>
+<script>
+  const PAGE_SIZE = 50;
+  const MAX_BYTES = 4 * 1024 * 1024;
+  const element = (id) => document.getElementById(id);
+  let columns = [];
+  let rows = [];
+  let view = { filter: "", page: 0, sort: null };
+  let saveTimer = null;
+
+  /** RFC 4180 CSV: quoted fields may hold commas, line breaks, and doubled quotes. */
+  function parseCsv(text) {
+    const records = [];
+    let record = [];
+    let field = "";
+    let quoted = false;
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index];
+      if (quoted) {
+        if (character === '"' && text[index + 1] === '"') { field += '"'; index++; }
+        else if (character === '"') quoted = false;
+        else field += character;
+      } else if (character === '"') quoted = true;
+      else if (character === ",") { record.push(field); field = ""; }
+      else if (character === "\n" || character === "\r") {
+        if (character === "\r" && text[index + 1] === "\n") index++;
+        record.push(field); records.push(record); record = []; field = "";
+      } else field += character;
+    }
+    if (field !== "" || record.length > 0) { record.push(field); records.push(record); }
+    return records.filter((entry) => entry.length > 1 || entry[0] !== "");
+  }
+
+  function saveView() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      oa.state.set(view).catch((error) => console.error("Table Lens could not save its view:", error));
+    }, 300);
+  }
+
+  function visibleRows() {
+    const needle = view.filter.trim().toLowerCase();
+    const matching = needle ? rows.filter((row) => row.some((cell) => cell.toLowerCase().includes(needle))) : rows.slice();
+    if (view.sort) {
+      const { column, descending } = view.sort;
+      const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+      matching.sort((left, right) => collator.compare(left[column] ?? "", right[column] ?? "") * (descending ? -1 : 1));
+    }
+    return matching;
+  }
+
+  function render() {
+    const main = element("main");
+    if (columns.length === 0) return;
+    const matching = visibleRows();
+    const pages = Math.max(1, Math.ceil(matching.length / PAGE_SIZE));
+    view.page = Math.min(view.page, pages - 1);
+    const table = document.createElement("table");
+    const head = table.createTHead().insertRow();
+    columns.forEach((label, column) => {
+      const cell = document.createElement("th");
+      const arrow = view.sort && view.sort.column === column ? (view.sort.descending ? " ▼" : " ▲") : "";
+      cell.textContent = label + arrow;
+      cell.onclick = () => {
+        const descending = !!view.sort && view.sort.column === column && !view.sort.descending;
+        view.sort = { column, descending };
+        render(); saveView();
+      };
+      head.appendChild(cell);
+    });
+    const body = table.createTBody();
+    for (const row of matching.slice(view.page * PAGE_SIZE, (view.page + 1) * PAGE_SIZE)) {
+      const line = body.insertRow();
+      columns.forEach((_, column) => { line.insertCell().textContent = row[column] ?? ""; });
+    }
+    main.replaceChildren(table);
+    element("count").textContent = matching.length === rows.length
+      ? rows.length + " rows" : matching.length + " of " + rows.length + " rows";
+    element("page").textContent = "Page " + (view.page + 1) + " of " + pages;
+    element("previous").disabled = view.page === 0;
+    element("next").disabled = view.page >= pages - 1;
+  }
+
+  function showMessage(message) {
+    const note = document.createElement("div");
+    note.className = "empty muted";
+    note.textContent = message;
+    element("main").replaceChildren(note);
+  }
+
+  async function load() {
+    const file = await oa.file.current();
+    if (!file) return;
+    element("name").textContent = file.name;
+    element("name").classList.remove("muted");
+    try {
+      const records = parseCsv((await oa.file.read({ maxBytes: MAX_BYTES })).text());
+      if (records.length === 0) { columns = []; rows = []; showMessage(file.name + " is empty."); return; }
+      [columns, ...rows] = records;
+      element("filter").disabled = false;
+      render();
+    } catch (error) {
+      columns = []; rows = [];
+      showMessage(error.message);
+    }
+  }
+
+  element("choose").onclick = async () => {
+    const file = await oa.file.choose();
+    if (!file) return;
+    view = { filter: "", page: 0, sort: null };
+    element("filter").value = "";
+    saveView();
+    await load();
+  };
+  element("filter").oninput = (event) => { view.filter = event.target.value; view.page = 0; render(); saveView(); };
+  element("previous").onclick = () => { view.page--; render(); saveView(); };
+  element("next").onclick = () => { view.page++; render(); saveView(); };
+
+  oa.ready()
+    .then(() => oa.state.get())
+    .then((saved) => {
+      if (saved && typeof saved === "object") view = Object.assign(view, saved);
+      element("filter").value = view.filter;
+      return load();
+    })
+    .catch((error) => showMessage(error.message));
+</script>
+</body>
+</html>

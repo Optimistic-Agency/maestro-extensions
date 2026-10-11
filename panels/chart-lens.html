@@ -1,0 +1,187 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chart Lens</title>
+<script type="application/oa-panel+json">
+{
+  "id": "chart-lens",
+  "name": "Chart Lens",
+  "version": "1.0.0",
+  "description": "Chart a column of a CSV file from your project as bars, largest first.",
+  "icon": "📈",
+  "permissions": ["file.read"]
+}
+</script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    font: 12px/1.4 var(--font-sans, system-ui, sans-serif);
+    color: var(--color-text-primary, #e5e7eb);
+    background: var(--color-background-primary, #111827);
+  }
+  header {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 10px; border-bottom: 1px solid var(--color-border-primary, #374151);
+    background: var(--color-background-secondary, #1f2937);
+  }
+  button, select {
+    font: inherit; color: inherit; border-radius: 4px; padding: 3px 8px;
+    border: 1px solid var(--color-border-secondary, #4b5563);
+    background: var(--color-background-tertiary, #374151);
+  }
+  button { cursor: pointer; }
+  select:disabled { opacity: .45; }
+  .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+  .muted { color: var(--color-text-secondary, #9ca3af); }
+  main { flex: 1; overflow: auto; padding: 10px; }
+  .bar { display: grid; grid-template-columns: minmax(60px, 30%) 1fr; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .label { text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .track { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .fill { height: 16px; border-radius: 2px; background: var(--color-ring-primary, #3b82f6); min-width: 2px; }
+  .fill.negative { background: var(--color-text-tertiary, #6b7280); }
+  .value { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .empty { padding: 32px 16px; text-align: center; }
+  footer { padding: 6px 10px; border-top: 1px solid var(--color-border-primary, #374151); text-align: right; }
+</style>
+</head>
+<body>
+<header>
+  <button id="choose">Choose CSV…</button>
+  <span id="name" class="name muted">No file</span>
+  <select id="label" title="Label column" disabled></select>
+  <select id="value" title="Value column" disabled></select>
+</header>
+<main id="main"><div class="empty muted">Choose a CSV file from your project to chart one of its columns.</div></main>
+<footer><span id="count" class="muted"></span></footer>
+<script>
+  const MAX_BARS = 40;
+  const MAX_BYTES = 4 * 1024 * 1024;
+  const element = (id) => document.getElementById(id);
+  const format = new Intl.NumberFormat();
+  let columns = [];
+  let rows = [];
+  let view = { label: null, value: null };
+
+  /** RFC 4180 CSV: quoted fields may hold commas, line breaks, and doubled quotes. */
+  function parseCsv(text) {
+    const records = [];
+    let record = [];
+    let field = "";
+    let quoted = false;
+    for (let index = 0; index < text.length; index++) {
+      const character = text[index];
+      if (quoted) {
+        if (character === '"' && text[index + 1] === '"') { field += '"'; index++; }
+        else if (character === '"') quoted = false;
+        else field += character;
+      } else if (character === '"') quoted = true;
+      else if (character === ",") { record.push(field); field = ""; }
+      else if (character === "\n" || character === "\r") {
+        if (character === "\r" && text[index + 1] === "\n") index++;
+        record.push(field); records.push(record); record = []; field = "";
+      } else field += character;
+    }
+    if (field !== "" || record.length > 0) { record.push(field); records.push(record); }
+    return records.filter((entry) => entry.length > 1 || entry[0] !== "");
+  }
+
+  /** A cell's number, or null when the cell is not a number. Thousands separators are allowed. */
+  function number(cell) {
+    const trimmed = (cell ?? "").replace(/[,\s]/g, "");
+    return trimmed !== "" && Number.isFinite(Number(trimmed)) ? Number(trimmed) : null;
+  }
+
+  const numericColumns = () => columns.map((_, column) => column)
+    .filter((column) => rows.length > 0 && rows.every((row) => number(row[column]) !== null));
+
+  function fillSelect(select, choices, selected) {
+    select.replaceChildren(...choices.map((column) => new Option(columns[column], String(column), false, column === selected)));
+    select.disabled = false;
+  }
+
+  function render() {
+    const numeric = numericColumns();
+    if (numeric.length === 0) { showMessage("No column in this file holds only numbers, so there is nothing to chart."); return; }
+    if (!numeric.includes(view.value)) view.value = numeric[0];
+    if (!Number.isInteger(view.label) || view.label < 0 || view.label >= columns.length) {
+      view.label = Math.max(0, columns.findIndex((_, column) => !numeric.includes(column)));
+    }
+    fillSelect(element("label"), columns.map((_, column) => column), view.label);
+    fillSelect(element("value"), numeric, view.value);
+    const bars = rows.map((row) => ({ label: row[view.label] ?? "", value: number(row[view.value]) }))
+      .sort((left, right) => right.value - left.value);
+    const largest = Math.max(...bars.map((bar) => Math.abs(bar.value)), 1);
+    element("main").replaceChildren(...bars.slice(0, MAX_BARS).map((bar) => {
+      const line = document.createElement("div");
+      line.className = "bar";
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = bar.label;
+      const track = document.createElement("span");
+      track.className = "track";
+      const fill = document.createElement("span");
+      fill.className = bar.value < 0 ? "fill negative" : "fill";
+      fill.style.width = (Math.abs(bar.value) / largest * 80) + "%";
+      const value = document.createElement("span");
+      value.className = "value muted";
+      value.textContent = format.format(bar.value);
+      track.append(fill, value);
+      line.append(label, track);
+      return line;
+    }));
+    element("count").textContent = bars.length > MAX_BARS
+      ? "Largest " + MAX_BARS + " of " + bars.length + " rows" : bars.length + " rows";
+  }
+
+  function saveView() {
+    oa.state.set(view).catch((error) => console.error("Chart Lens could not save its view:", error));
+  }
+
+  function showMessage(message) {
+    const note = document.createElement("div");
+    note.className = "empty muted";
+    note.textContent = message;
+    element("main").replaceChildren(note);
+    element("count").textContent = "";
+  }
+
+  async function load() {
+    const file = await oa.file.current();
+    if (!file) return;
+    element("name").textContent = file.name;
+    element("name").classList.remove("muted");
+    try {
+      const records = parseCsv((await oa.file.read({ maxBytes: MAX_BYTES })).text());
+      if (records.length < 2) { columns = []; rows = []; showMessage(file.name + " has no rows to chart."); return; }
+      [columns, ...rows] = records;
+      render();
+    } catch (error) {
+      columns = []; rows = [];
+      showMessage(error.message);
+    }
+  }
+
+  element("choose").onclick = async () => {
+    const file = await oa.file.choose();
+    if (!file) return;
+    view = { label: null, value: null };
+    await load();
+    saveView();
+  };
+  element("label").onchange = (event) => { view.label = Number(event.target.value); render(); saveView(); };
+  element("value").onchange = (event) => { view.value = Number(event.target.value); render(); saveView(); };
+
+  oa.ready()
+    .then(() => oa.state.get())
+    .then((saved) => {
+      if (saved && typeof saved === "object") view = Object.assign(view, saved);
+      return load();
+    })
+    .catch((error) => showMessage(error.message));
+</script>
+</body>
+</html>
