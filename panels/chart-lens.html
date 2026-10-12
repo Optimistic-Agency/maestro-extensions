@@ -7,10 +7,14 @@
 {
   "id": "chart-lens",
   "name": "Chart Lens",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Chart a column of a CSV file from your project as bars, largest first.",
   "icon": "📈",
-  "permissions": ["file.read"]
+  "permissions": ["file.read"],
+  "tools": [
+    { "name": "get_chart", "description": "Returns this pane's selected columns and the displayed bars, largest first, at most 40.", "input_schema": { "type": "object", "properties": {} } },
+    { "name": "set_column", "description": "Selects the numeric value column by its exact header, optionally selects the label column, and returns the displayed chart.", "input_schema": { "type": "object", "properties": { "column": { "type": "string" }, "label": { "type": "string" } }, "required": ["column"] } }
+  ]
 }
 </script>
 <style>
@@ -98,6 +102,15 @@
   const numericColumns = () => columns.map((_, column) => column)
     .filter((column) => rows.length > 0 && rows.every((row) => number(row[column]) !== null));
 
+  function chart() {
+    return {
+      columns, label: columns[view.label] ?? null, column: columns[view.value] ?? null,
+      bars: rows.map((row) => ({ label: row[view.label] ?? "", value: number(row[view.value]) }))
+        .sort((left, right) => right.value - left.value).slice(0, MAX_BARS),
+      total: rows.length,
+    };
+  }
+
   function fillSelect(select, choices, selected) {
     select.replaceChildren(...choices.map((column) => new Option(columns[column], String(column), false, column === selected)));
     select.disabled = false;
@@ -112,10 +125,9 @@
     }
     fillSelect(element("label"), columns.map((_, column) => column), view.label);
     fillSelect(element("value"), numeric, view.value);
-    const bars = rows.map((row) => ({ label: row[view.label] ?? "", value: number(row[view.value]) }))
-      .sort((left, right) => right.value - left.value);
+    const { bars } = chart();
     const largest = Math.max(...bars.map((bar) => Math.abs(bar.value)), 1);
-    element("main").replaceChildren(...bars.slice(0, MAX_BARS).map((bar) => {
+    element("main").replaceChildren(...bars.map((bar) => {
       const line = document.createElement("div");
       line.className = "bar";
       const label = document.createElement("span");
@@ -133,8 +145,8 @@
       line.append(label, track);
       return line;
     }));
-    element("count").textContent = bars.length > MAX_BARS
-      ? "Largest " + MAX_BARS + " of " + bars.length + " rows" : bars.length + " rows";
+    element("count").textContent = rows.length > MAX_BARS
+      ? "Largest " + MAX_BARS + " of " + rows.length + " rows" : rows.length + " rows";
   }
 
   function saveView() {
@@ -151,17 +163,19 @@
 
   async function load() {
     const file = await oa.file.current();
-    if (!file) return;
+    if (!file) return false;
     element("name").textContent = file.name;
     element("name").classList.remove("muted");
     try {
       const records = parseCsv((await oa.file.read({ maxBytes: MAX_BYTES })).text());
-      if (records.length < 2) { columns = []; rows = []; showMessage(file.name + " has no rows to chart."); return; }
+      if (records.length < 2) throw new Error(file.name + " has no rows to chart.");
       [columns, ...rows] = records;
       render();
+      return true;
     } catch (error) {
       columns = []; rows = [];
       showMessage(error.message);
+      throw error;
     }
   }
 
@@ -169,19 +183,42 @@
     const file = await oa.file.choose();
     if (!file) return;
     view = { label: null, value: null };
-    await load();
+    loaded = load();
+    await loaded;
     saveView();
   };
   element("label").onchange = (event) => { view.label = Number(event.target.value); render(); saveView(); };
   element("value").onchange = (event) => { view.value = Number(event.target.value); render(); saveView(); };
 
-  oa.ready()
+  async function requireChart() {
+    if (!await loaded) throw new Error("Bind a CSV to this pane with open_file_for_user first.");
+    if (numericColumns().length === 0) throw new Error("No column in this file holds only numbers.");
+  }
+
+  oa.tools.handle("get_chart", async () => { await requireChart(); return chart(); });
+  oa.tools.handle("set_column", async (input) => {
+    await requireChart();
+    if (typeof input.column !== "string") throw new Error("column must be an exact CSV header.");
+    const column = columns.indexOf(input.column);
+    if (!numericColumns().includes(column)) throw new Error("column must name a numeric column: " + numericColumns().map((index) => columns[index]).join(", "));
+    let label = view.label;
+    if (input.label !== undefined) {
+      if (typeof input.label !== "string" || !columns.includes(input.label)) throw new Error("label must be an exact CSV header.");
+      label = columns.indexOf(input.label);
+    }
+    view = { label, value: column };
+    render();
+    await oa.state.set(view);
+    return chart();
+  });
+
+  let loaded = oa.ready()
     .then(() => oa.state.get())
     .then((saved) => {
       if (saved && typeof saved === "object") view = Object.assign(view, saved);
       return load();
-    })
-    .catch((error) => showMessage(error.message));
+    });
+  loaded.catch((error) => showMessage(error.message));
 </script>
 </body>
 </html>

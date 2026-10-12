@@ -7,10 +7,14 @@
 {
   "id": "table-lens",
   "name": "Table Lens",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Browse, sort, and filter a CSV file from your project as a table.",
   "icon": "📊",
-  "permissions": ["file.read"]
+  "permissions": ["file.read"],
+  "tools": [
+    {"name":"get_rows","description":"Return this pane's current page of filtered and sorted rows, with column names and matching count.","input_schema":{"type":"object","properties":{}}},
+    {"name":"set_filter","description":"Set this pane's filter text and return the matching row count.","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}
+  ]
 }
 </script>
 <style>
@@ -158,18 +162,20 @@
 
   async function load() {
     const file = await oa.file.current();
-    if (!file) return;
+    if (!file) return false;
     element("name").textContent = file.name;
     element("name").classList.remove("muted");
     try {
       const records = parseCsv((await oa.file.read({ maxBytes: MAX_BYTES })).text());
-      if (records.length === 0) { columns = []; rows = []; showMessage(file.name + " is empty."); return; }
+      if (records.length === 0) { columns = []; rows = []; showMessage(file.name + " is empty."); return true; }
       [columns, ...rows] = records;
       element("filter").disabled = false;
       render();
+      return true;
     } catch (error) {
       columns = []; rows = [];
       showMessage(error.message);
+      throw error;
     }
   }
 
@@ -179,20 +185,40 @@
     view = { filter: "", page: 0, sort: null };
     element("filter").value = "";
     saveView();
-    await load();
+    loaded = load();
+    await loaded;
   };
   element("filter").oninput = (event) => { view.filter = event.target.value; view.page = 0; render(); saveView(); };
   element("previous").onclick = () => { view.page--; render(); saveView(); };
   element("next").onclick = () => { view.page++; render(); saveView(); };
 
-  oa.ready()
+  oa.tools.handle("get_rows", async (_input, { signal }) => {
+    if (!await loaded) throw new Error("No file is bound to this pane. Use open_file_for_user with this panel_id.");
+    signal.throwIfAborted();
+    const matching = visibleRows();
+    return { columns, rows: matching.slice(view.page * PAGE_SIZE, (view.page + 1) * PAGE_SIZE),
+      matched: matching.length, total: rows.length, page: view.page + 1 };
+  });
+  oa.tools.handle("set_filter", async (input, { signal }) => {
+    if (typeof input.text !== "string") throw new Error('set_filter requires a string "text".');
+    if (!await loaded) throw new Error("No file is bound to this pane. Use open_file_for_user with this panel_id.");
+    signal.throwIfAborted();
+    view.filter = input.text; view.page = 0;
+    element("filter").value = view.filter;
+    render();
+    clearTimeout(saveTimer);
+    await oa.state.set(view);
+    return { matched: visibleRows().length };
+  });
+
+  let loaded = oa.ready()
     .then(() => oa.state.get())
     .then((saved) => {
       if (saved && typeof saved === "object") view = Object.assign(view, saved);
       element("filter").value = view.filter;
       return load();
-    })
-    .catch((error) => showMessage(error.message));
+    });
+  loaded.catch((error) => showMessage(error.message));
 </script>
 </body>
 </html>
