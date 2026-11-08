@@ -1,6 +1,6 @@
 # Maestro extensions
 
-The canonical examples of custom panels for [Maestro](https://optimisticagency.com/developers), each one self-contained HTML file.
+The canonical examples of custom panels and tools for [Maestro](https://optimisticagency.com/developers), each one self-contained HTML file.
 
 | Panel | What it does | Source |
 | --- | --- | --- |
